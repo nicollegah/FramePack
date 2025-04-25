@@ -100,14 +100,16 @@ os.makedirs(outputs_folder, exist_ok=True)
 
 
 @torch.no_grad()
-def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
+def worker(input_image, prompt_1, prompt_2, prompt_3, prompt_4, prompt_5, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
     total_target_latent_frames = math.ceil((total_second_length * 30) / 4)
     total_latent_sections = math.ceil(total_target_latent_frames / latent_window_size)
     total_latent_sections = int(max(total_latent_sections, 1))
 
-    # Calculate transition points (latent frame indices from the start)
-    transition_point_1 = total_target_latent_frames / 3
-    transition_point_2 = 2 * total_target_latent_frames / 3
+    # Calculate transition points (latent frame indices from the start) for 5 segments
+    transition_point_1 = total_target_latent_frames / 5
+    transition_point_2 = 2 * total_target_latent_frames / 5
+    transition_point_3 = 3 * total_target_latent_frames / 5
+    transition_point_4 = 4 * total_target_latent_frames / 5
 
     job_id = generate_timestamp()
 
@@ -128,10 +130,12 @@ def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_seco
             fake_diffusers_current_device(text_encoder, gpu)  # since we only encode one text - that is one model move and one encode, offload is same time consumption since it is also one load and one encode.
             load_model_as_complete(text_encoder_2, target_device=gpu)
 
-        # Encode all three prompts
+        # Encode all five prompts
         llama_vec_1, clip_l_pooler_1 = encode_prompt_conds(prompt_1, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
         llama_vec_2, clip_l_pooler_2 = encode_prompt_conds(prompt_2, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
         llama_vec_3, clip_l_pooler_3 = encode_prompt_conds(prompt_3, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
+        llama_vec_4, clip_l_pooler_4 = encode_prompt_conds(prompt_4, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
+        llama_vec_5, clip_l_pooler_5 = encode_prompt_conds(prompt_5, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
 
         # Encode negative prompt (only one needed)
         if n_prompt and cfg != 1: # Only encode if n_prompt is given and cfg > 1
@@ -146,6 +150,8 @@ def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_seco
         llama_vec_1, llama_attention_mask_1 = crop_or_pad_yield_mask(llama_vec_1, length=512)
         llama_vec_2, llama_attention_mask_2 = crop_or_pad_yield_mask(llama_vec_2, length=512)
         llama_vec_3, llama_attention_mask_3 = crop_or_pad_yield_mask(llama_vec_3, length=512)
+        llama_vec_4, llama_attention_mask_4 = crop_or_pad_yield_mask(llama_vec_4, length=512)
+        llama_vec_5, llama_attention_mask_5 = crop_or_pad_yield_mask(llama_vec_5, length=512)
         llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
 
         # Processing input image
@@ -184,10 +190,14 @@ def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_seco
         llama_vec_1 = llama_vec_1.to(transformer.dtype)
         llama_vec_2 = llama_vec_2.to(transformer.dtype)
         llama_vec_3 = llama_vec_3.to(transformer.dtype)
+        llama_vec_4 = llama_vec_4.to(transformer.dtype)
+        llama_vec_5 = llama_vec_5.to(transformer.dtype)
         llama_vec_n = llama_vec_n.to(transformer.dtype)
         clip_l_pooler_1 = clip_l_pooler_1.to(transformer.dtype)
         clip_l_pooler_2 = clip_l_pooler_2.to(transformer.dtype)
         clip_l_pooler_3 = clip_l_pooler_3.to(transformer.dtype)
+        clip_l_pooler_4 = clip_l_pooler_4.to(transformer.dtype)
+        clip_l_pooler_5 = clip_l_pooler_5.to(transformer.dtype)
         clip_l_pooler_n = clip_l_pooler_n.to(transformer.dtype)
         image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(transformer.dtype)
 
@@ -251,11 +261,21 @@ def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_seco
                 current_mask = llama_attention_mask_2
                 current_pooler = clip_l_pooler_2
                 print(f"Section {i} (padding {latent_padding}): Using Prompt 2 ({transition_point_1:.1f} <= Mid frame {mid_frame_idx:.1f} < {transition_point_2:.1f})")
-            else:
+            elif mid_frame_idx < transition_point_3:
                 current_llama_vec = llama_vec_3
                 current_mask = llama_attention_mask_3
                 current_pooler = clip_l_pooler_3
-                print(f"Section {i} (padding {latent_padding}): Using Prompt 3 (Mid frame {mid_frame_idx:.1f} >= {transition_point_2:.1f})")
+                print(f"Section {i} (padding {latent_padding}): Using Prompt 3 ({transition_point_2:.1f} <= Mid frame {mid_frame_idx:.1f} < {transition_point_3:.1f})")
+            elif mid_frame_idx < transition_point_4:
+                current_llama_vec = llama_vec_4
+                current_mask = llama_attention_mask_4
+                current_pooler = clip_l_pooler_4
+                print(f"Section {i} (padding {latent_padding}): Using Prompt 4 ({transition_point_3:.1f} <= Mid frame {mid_frame_idx:.1f} < {transition_point_4:.1f})")
+            else:
+                current_llama_vec = llama_vec_5
+                current_mask = llama_attention_mask_5
+                current_pooler = clip_l_pooler_5
+                print(f"Section {i} (padding {latent_padding}): Using Prompt 5 (Mid frame {mid_frame_idx:.1f} >= {transition_point_4:.1f})")
 
             if not high_vram:
                 unload_complete_models()
@@ -361,21 +381,47 @@ def worker(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_seco
     return
 
 
-def process(input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
+def process(input_image, prompt_1, prompt_2, prompt_3, prompt_4, prompt_5, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
     global stream
     assert input_image is not None, 'No input image!'
-    assert prompt_1 or prompt_2 or prompt_3, 'At least one prompt must be provided!'
 
-    # Use the first prompt if others are empty, etc.
-    if not prompt_1: prompt_1 = prompt_2 if prompt_2 else prompt_3
-    if not prompt_3: prompt_3 = prompt_2 if prompt_2 else prompt_1
-    if not prompt_2: prompt_2 = prompt_1 # Default middle to start if empty after filling others
+    # Filter out empty prompts and ensure at least one exists
+    prompts = [p for p in [prompt_1, prompt_2, prompt_3, prompt_4, prompt_5] if p and p.strip()]
+    assert prompts, 'At least one prompt must be provided!'
+
+    # If fewer than 5 prompts are provided, distribute them (simple fill forward/backward)
+    # This is a basic strategy; more complex interpolation could be used.
+    if len(prompts) < 5:
+        filled_prompts = ["" for _ in range(5)]
+        if len(prompts) == 1:
+            filled_prompts = [prompts[0]] * 5
+        elif len(prompts) == 2:
+            filled_prompts[0] = prompts[0]
+            filled_prompts[1] = prompts[0]
+            filled_prompts[2] = prompts[1] # Middle leans towards end
+            filled_prompts[3] = prompts[1]
+            filled_prompts[4] = prompts[1]
+        elif len(prompts) == 3:
+            filled_prompts[0] = prompts[0]
+            filled_prompts[1] = prompts[0]
+            filled_prompts[2] = prompts[1]
+            filled_prompts[3] = prompts[2]
+            filled_prompts[4] = prompts[2]
+        elif len(prompts) == 4:
+            filled_prompts[0] = prompts[0]
+            filled_prompts[1] = prompts[1]
+            filled_prompts[2] = prompts[2]
+            filled_prompts[3] = prompts[3]
+            filled_prompts[4] = prompts[3] # Last one duplicates
+        prompt_1, prompt_2, prompt_3, prompt_4, prompt_5 = filled_prompts
+    else:
+        prompt_1, prompt_2, prompt_3, prompt_4, prompt_5 = prompts[:5]
 
     yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
 
     stream = AsyncStream()
 
-    async_run(worker, input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf)
+    async_run(worker, input_image, prompt_1, prompt_2, prompt_3, prompt_4, prompt_5, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf)
 
     output_filename = None
 
@@ -404,10 +450,10 @@ quick_prompts = [
     'A character doing some simple body movements.',
 ]
 quick_prompts = [[x] for x in quick_prompts]
-# Modify quick prompts for three inputs
+# Modify quick prompts for five inputs
 quick_prompts = [
-    ['A car driving down a road during the day.', 'The car continues driving as the sun sets.', 'The car drives through the city at night.'],
-    ['A seed sprouts from the ground.', 'A small plant grows taller.', 'The plant blossoms with flowers.'],
+    ['A car driving down a road during the day.', 'The car continues driving as the sun sets.', 'The car drives through the city at night.', 'The car drives over a bridge.', 'The car arrives at its destination.'],
+    ['A seed sprouts from the ground.', 'A small plant grows taller.', 'The plant develops leaves.', 'The plant buds.', 'The plant blossoms with flowers.'],
 ]
 
 
@@ -419,10 +465,12 @@ with block:
         with gr.Column():
             input_image = gr.Image(sources='upload', type="numpy", label="Image", height=320)
             prompt_1 = gr.Textbox(label="Prompt 1 (Start)", value='')
-            prompt_2 = gr.Textbox(label="Prompt 2 (Middle)", value='')
-            prompt_3 = gr.Textbox(label="Prompt 3 (End)", value='')
-            example_quick_prompts = gr.Dataset(samples=quick_prompts, label='Quick Prompt Sets', samples_per_page=1000, components=[prompt_1, prompt_2, prompt_3])
-            example_quick_prompts.click(lambda x: x, inputs=[example_quick_prompts], outputs=[prompt_1, prompt_2, prompt_3], show_progress=False, queue=False)
+            prompt_2 = gr.Textbox(label="Prompt 2", value='')
+            prompt_3 = gr.Textbox(label="Prompt 3", value='')
+            prompt_4 = gr.Textbox(label="Prompt 4", value='')
+            prompt_5 = gr.Textbox(label="Prompt 5 (End)", value='')
+            example_quick_prompts = gr.Dataset(samples=quick_prompts, label='Quick Prompt Sets', samples_per_page=1000, components=[prompt_1, prompt_2, prompt_3, prompt_4, prompt_5])
+            example_quick_prompts.click(lambda x: x, inputs=[example_quick_prompts], outputs=[prompt_1, prompt_2, prompt_3, prompt_4, prompt_5], show_progress=False, queue=False)
 
             with gr.Row():
                 start_button = gr.Button(value="Start Generation")
@@ -455,7 +503,7 @@ with block:
 
     gr.HTML('<div style="text-align:center; margin-top:20px;">Share your results and find ideas at the <a href="https://x.com/search?q=framepack&f=live" target="_blank">FramePack Twitter (X) thread</a></div>')
 
-    ips = [input_image, prompt_1, prompt_2, prompt_3, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf]
+    ips = [input_image, prompt_1, prompt_2, prompt_3, prompt_4, prompt_5, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf]
     start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
     end_button.click(fn=end_process)
 
